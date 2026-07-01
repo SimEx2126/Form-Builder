@@ -28,14 +28,16 @@ function localStorage() {
     mode: "local",
     // The browser will PUT the bytes to our own server, which streams to disk.
     async createUploadUrl({ key, contentType }) {
+      // Relative URL so it resolves to whatever host the page is on
+      // (localhost on desktop, the Mac's IP on a phone) via the dev proxy.
       return {
-        uploadUrl: `${PUBLIC_BASE}/local/${encodeURIComponent(key)}`,
+        uploadUrl: `/local/${encodeURIComponent(key)}`,
         method: "PUT",
         headers: contentType ? { "Content-Type": contentType } : {},
       };
     },
     async createDownloadUrl({ key }) {
-      return `${PUBLIC_BASE}/local/${encodeURIComponent(key)}`;
+      return `/local/${encodeURIComponent(key)}`;
     },
     pathForKey(key) {
       // keys look like "2026/06/<id>-<filename>"; keep the structure on disk
