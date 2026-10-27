@@ -6,7 +6,7 @@ import express from "express";
 import cors from "cors";
 import { nanoid } from "nanoid";
 import { storage } from "./storage.js";
-import { makeStore } from "./store.js";
+import { makeStore, dbReady } from "./store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4000);
@@ -24,9 +24,9 @@ const isAllowedUpload = (type) => !!type && ALLOWED.some((fn) => fn(type));
 const FIELD_TYPES = ["short_text", "long_text", "email", "name", "full_name", "dropdown", "multiple_choice", "file"];
 const CHOICE_TYPES = ["dropdown", "multiple_choice"];
 
-const submissions = makeStore("submissions.json"); // uploaded files
-const forms = makeStore("forms.json"); // form definitions
-const responses = makeStore("responses.json"); // filled-in answers
+const submissions = makeStore("submissions"); // uploaded files
+const forms = makeStore("forms"); // form definitions
+const responses = makeStore("responses"); // filled-in answers
 
 const app = express();
 app.use(cors());
@@ -52,7 +52,7 @@ app.post("/api/uploads/presign", async (req, res) => {
     const key = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, "0")}/${id}-${safeName}`;
     const upload = await storage.createUploadUrl({ key, contentType });
 
-    submissions.insert({
+    await submissions.insert({
       id, key, filename, contentType, size: size ?? null,
       status: "pending", createdAt: now.toISOString(),
     });
@@ -63,8 +63,8 @@ app.post("/api/uploads/presign", async (req, res) => {
   }
 });
 
-app.post("/api/uploads/:id/complete", (req, res) => {
-  const row = submissions.update(req.params.id, {
+app.post("/api/uploads/:id/complete", async (req, res) => {
+  const row = await submissions.update(req.params.id, {
     status: "complete",
     completedAt: new Date().toISOString(),
     ...(typeof req.body?.size === "number" ? { size: req.body.size } : {}),
@@ -74,7 +74,7 @@ app.post("/api/uploads/:id/complete", (req, res) => {
 });
 
 app.get("/api/uploads/:id/download", async (req, res) => {
-  const row = submissions.find(req.params.id);
+  const row = await submissions.find(req.params.id);
   if (!row) return res.status(404).json({ error: "Not found" });
   const url = await storage.createDownloadUrl({ key: row.key });
   res.json({ url, filename: row.filename, contentType: row.contentType });
@@ -132,7 +132,7 @@ function normalizeForm(body, existingFields) {
   return { errors, title, description: (body?.description || "").trim(), fields, audience, category };
 }
 
-app.post("/api/forms", (req, res) => {
+app.post("/api/forms", async (req, res) => {
   const { errors, title, description, fields, audience, category } = normalizeForm(req.body);
   if (errors.length) return res.status(400).json({ error: errors.join("; ") });
   const form = {
@@ -140,16 +140,16 @@ app.post("/api/forms", (req, res) => {
     title, description, audience, category, fields,
     createdAt: new Date().toISOString(),
   };
-  forms.insert(form);
+  await forms.insert(form);
   res.json(form);
 });
 
-app.put("/api/forms/:id", (req, res) => {
-  const existing = forms.find(req.params.id);
+app.put("/api/forms/:id", async (req, res) => {
+  const existing = await forms.find(req.params.id);
   if (!existing) return res.status(404).json({ error: "Not found" });
   const { errors, title, description, fields, audience, category } = normalizeForm(req.body, existing.fields);
   if (errors.length) return res.status(400).json({ error: errors.join("; ") });
-  const form = forms.update(req.params.id, {
+  const form = await forms.update(req.params.id, {
     title, description, audience, category, fields,
     updatedAt: new Date().toISOString(),
   });
@@ -157,30 +157,30 @@ app.put("/api/forms/:id", (req, res) => {
 });
 
 // List forms (newest first), with a response count for the dashboard.
-app.get("/api/forms", (_req, res) => {
-  const counts = responses.all().reduce((acc, r) => {
-    acc[r.formId] = (acc[r.formId] || 0) + 1;
-    return acc;
-  }, {});
-  const rows = forms
-    .all()
+app.get("/api/forms", async (_req, res) => {
+  const [counts, allForms] = await Promise.all([
+    responses.countByField("formId"),
+    forms.all(),
+  ]);
+  const rows = allForms
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
-    .map((f) => ({ ...f, responseCount: counts[f.id] || 0 }));
+    .map(({ _id, ...f }) => ({ ...f, responseCount: counts[f.id] || 0 }));
   res.json(rows);
 });
 
-app.get("/api/forms/:id", (req, res) => {
-  const form = forms.find(req.params.id);
+app.get("/api/forms/:id", async (req, res) => {
+  const form = await forms.find(req.params.id);
   if (!form) return res.status(404).json({ error: "Not found" });
-  res.json(form);
+  const { _id, ...f } = form;
+  res.json(f);
 });
 
 // ===========================================================================
 // RESPONSES  (the fill side)
 // ===========================================================================
 
-app.post("/api/forms/:id/responses", (req, res) => {
-  const form = forms.find(req.params.id);
+app.post("/api/forms/:id/responses", async (req, res) => {
+  const form = await forms.find(req.params.id);
   if (!form) return res.status(404).json({ error: "Form not found" });
 
   const answers = req.body?.answers || {};
@@ -206,17 +206,18 @@ app.post("/api/forms/:id/responses", (req, res) => {
     answers,
     createdAt: new Date().toISOString(),
   };
-  responses.insert(response);
+  await responses.insert(response);
   res.json({ ok: true, id: response.id });
 });
 
-app.get("/api/forms/:id/responses", (req, res) => {
-  const form = forms.find(req.params.id);
+app.get("/api/forms/:id/responses", async (req, res) => {
+  const form = await forms.find(req.params.id);
   if (!form) return res.status(404).json({ error: "Form not found" });
-  const rows = responses
-    .filter((r) => r.formId === form.id)
-    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-  res.json({ form, responses: rows });
+  const rows = await responses.filter((r) => r.formId === form.id);
+  rows.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  const { _id: _fid, ...cleanForm } = form;
+  const cleanRows = rows.map(({ _id, ...r }) => r);
+  res.json({ form: cleanForm, responses: cleanRows });
 });
 
 // ===========================================================================
@@ -242,6 +243,11 @@ if (storage.mode === "local") {
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`form-builder server on http://localhost:${PORT} (storage: ${storage.mode})`);
+dbReady.then(() => {
+  app.listen(PORT, () => {
+    console.log(`form-builder server on http://localhost:${PORT} (storage: ${storage.mode}, db: mongodb)`);
+  });
+}).catch((err) => {
+  console.error("Failed to connect to MongoDB:", err.message);
+  process.exit(1);
 });

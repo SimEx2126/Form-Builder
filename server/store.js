@@ -1,35 +1,52 @@
-// Tiny JSON-file store. One file per collection.
-// Placeholder for the main app's real database — swap these for SQL/ORM calls
-// when porting into Morpheus.
+// MongoDB-backed store. One collection per entity.
+// Drop-in replacement for the old JSON-file store.
 
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { MongoClient } from "mongodb";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017";
+const DB_NAME = process.env.MONGO_DB || "formbuilder";
 
-export function makeStore(filename) {
-  const file = path.join(__dirname, filename);
-  const load = () =>
-    fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : [];
-  const save = (rows) => fs.writeFileSync(file, JSON.stringify(rows, null, 2));
+const client = new MongoClient(MONGO_URI);
+const dbReady = client.connect().then(() => client.db(DB_NAME));
+
+export function makeStore(name) {
+  const collName = name.replace(/\.json$/, "");
+  const col = dbReady.then((db) => db.collection(collName));
+
   return {
-    all: () => load(),
-    find: (id) => load().find((r) => r.id === id),
-    insert(row) {
-      const rows = load();
-      rows.push(row);
-      save(rows);
+    async all() {
+      return (await col).find().toArray();
+    },
+    async find(id) {
+      return (await col).findOne({ id });
+    },
+    async insert(row) {
+      await (await col).insertOne({ ...row });
       return row;
     },
-    update(id, patch) {
-      const rows = load();
-      const row = rows.find((r) => r.id === id);
-      if (!row) return null;
-      Object.assign(row, patch);
-      save(rows);
-      return row;
+    async update(id, patch) {
+      const c = await col;
+      const result = await c.findOneAndUpdate(
+        { id },
+        { $set: patch },
+        { returnDocument: "after" },
+      );
+      if (!result) return null;
+      const { _id, ...doc } = result;
+      return doc;
     },
-    filter: (fn) => load().filter(fn),
+    async filter(fn) {
+      const rows = await (await col).find().toArray();
+      return rows.filter(fn);
+    },
+    async countByField(field) {
+      const pipeline = [
+        { $group: { _id: `$${field}`, count: { $sum: 1 } } },
+      ];
+      const results = await (await col).aggregate(pipeline).toArray();
+      return Object.fromEntries(results.map((r) => [r._id, r.count]));
+    },
   };
 }
+
+export { dbReady };
