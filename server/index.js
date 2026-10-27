@@ -9,6 +9,7 @@ import { nanoid } from "nanoid";
 import { storage } from "./storage.js";
 import { makeStore, dbReady, ensureIndexes } from "./store.js";
 import { authRoutes, requireAuth } from "./auth.js";
+import { enqueue, onSubmit } from "./queue.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4000);
@@ -330,6 +331,13 @@ app.post("/api/forms/:id/responses", submitLimiter, async (req, res) => {
     throw err;
   }
 
+  enqueue({
+    formId: form.id,
+    formTitle: form.title,
+    responseId: response.id,
+    answers: response.answers,
+  });
+
   res.json({ ok: true, id: response.id });
 });
 
@@ -366,6 +374,32 @@ if (storage.mode === "local") {
     res.sendFile(file);
   });
 }
+
+// ===========================================================================
+// HEALTH CHECK (for monitoring / load balancer probes)
+// ===========================================================================
+app.get("/api/health", async (_req, res) => {
+  try {
+    const db = await dbReady;
+    await db.command({ ping: 1 });
+    res.json({ status: "ok", db: "connected", uptime: process.uptime() | 0 });
+  } catch {
+    res.status(503).json({ status: "degraded", db: "unreachable" });
+  }
+});
+
+// ===========================================================================
+// GLOBAL ERROR HANDLER
+// ===========================================================================
+app.use((err, req, res, _next) => {
+  console.error(`${new Date().toISOString()} ERROR ${req.method} ${req.originalUrl}`, err.stack || err.message);
+  res.status(500).json({ error: "Internal server error" });
+});
+
+// Register post-submit handlers (add email / webhook integrations here)
+onSubmit(async (job) => {
+  console.log(`[post-submit] New response ${job.responseId} on form "${job.formTitle}"`);
+});
 
 dbReady.then(async () => {
   await ensureIndexes({ forms, responses, submissions, users });

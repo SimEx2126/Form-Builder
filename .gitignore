@@ -7,4 +7,5 @@ server/uploads/
 server/submissions.json
 server/forms.json
 server/responses.json
+server/backups/
 *.log

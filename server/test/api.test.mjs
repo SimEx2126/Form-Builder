@@ -20,6 +20,18 @@ async function api(path, opts = {}) {
   return { status: res.status, body };
 }
 
+// ── Health ─────────────────────────────────────────────────────────────
+
+describe("Health", () => {
+  it("returns ok status", async () => {
+    const { status, body } = await api("/api/health");
+    assert.equal(status, 200);
+    assert.equal(body.status, "ok");
+    assert.equal(body.db, "connected");
+    assert.equal(typeof body.uptime, "number");
+  });
+});
+
 // ── Auth ────────────────────────────────────────────────────────────────
 
 describe("Auth", () => {
