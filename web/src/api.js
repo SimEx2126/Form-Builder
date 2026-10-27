@@ -28,21 +28,29 @@ export const createForm = (form) =>
     body: JSON.stringify(form),
   }).then((r) => jsonOrThrow(r, "Failed to save form"));
 
-export const updateForm = (id, form) =>
-  fetch(`${BASE}/api/forms/${id}`, {
+export const updateForm = async (id, form) => {
+  const res = await fetch(`${BASE}/api/forms/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(form),
-  }).then((r) => jsonOrThrow(r, "Failed to update form"));
+  });
+  if (res.status === 409) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "This form was modified by someone else. Please refresh and try again.");
+  }
+  return jsonOrThrow(res, "Failed to update form");
+};
 
 // ---- responses ------------------------------------------------------------
 
-export const submitResponse = (formId, answers) =>
-  fetch(`${BASE}/api/forms/${formId}/responses`, {
+export const submitResponse = (formId, answers) => {
+  const submissionId = globalThis.crypto?.randomUUID?.() || `sub_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  return fetch(`${BASE}/api/forms/${formId}/responses`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ answers }),
+    body: JSON.stringify({ submissionId, answers }),
   }).then((r) => jsonOrThrow(r, "Failed to submit"));
+};
 
 export const listResponses = (formId) =>
   fetch(`${BASE}/api/forms/${formId}/responses`).then((r) =>

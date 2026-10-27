@@ -35,6 +35,17 @@ export function makeStore(name) {
       const { _id, ...doc } = result;
       return doc;
     },
+    async updateIf(id, version, patch) {
+      const c = await col;
+      const result = await c.findOneAndUpdate(
+        { id, version },
+        { $set: patch },
+        { returnDocument: "after" },
+      );
+      if (!result) return null;
+      const { _id, ...doc } = result;
+      return doc;
+    },
     async filter(fn) {
       const rows = await (await col).find().toArray();
       return rows.filter(fn);
@@ -46,7 +57,19 @@ export function makeStore(name) {
       const results = await (await col).aggregate(pipeline).toArray();
       return Object.fromEntries(results.map((r) => [r._id, r.count]));
     },
+    async ensureIndex(spec, options) {
+      await (await col).createIndex(spec, options);
+    },
   };
+}
+
+export async function ensureIndexes(stores) {
+  const { forms, responses, submissions } = stores;
+  await forms.ensureIndex({ id: 1 }, { unique: true });
+  await responses.ensureIndex({ id: 1 }, { unique: true });
+  await responses.ensureIndex({ submissionId: 1 }, { unique: true, sparse: true });
+  await responses.ensureIndex({ formId: 1 });
+  await submissions.ensureIndex({ id: 1 }, { unique: true });
 }
 
 export { dbReady };

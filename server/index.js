@@ -4,9 +4,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 import { nanoid } from "nanoid";
 import { storage } from "./storage.js";
-import { makeStore, dbReady } from "./store.js";
+import { makeStore, dbReady, ensureIndexes } from "./store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4000);
@@ -32,11 +33,53 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
+// ---------------------------------------------------------------------------
+// NoSQL injection prevention — strip keys starting with $ from request bodies
+// ---------------------------------------------------------------------------
+function sanitize(obj) {
+  if (Array.isArray(obj)) return obj.map(sanitize);
+  if (obj !== null && typeof obj === "object") {
+    const clean = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (k.startsWith("$")) continue;
+      clean[k] = sanitize(v);
+    }
+    return clean;
+  }
+  return obj;
+}
+
+app.use((req, _res, next) => {
+  if (req.body && typeof req.body === "object") {
+    req.body = sanitize(req.body);
+  }
+  next();
+});
+
+// ---------------------------------------------------------------------------
+// Rate limiting
+// ---------------------------------------------------------------------------
+const publicLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, please try again later." },
+});
+
+const submitLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many submissions, please slow down." },
+});
+
 // ===========================================================================
 // FILE UPLOADS  (used by "file" fields; unchanged from the standalone tool)
 // ===========================================================================
 
-app.post("/api/uploads/presign", async (req, res) => {
+app.post("/api/uploads/presign", publicLimiter, async (req, res) => {
   try {
     const { filename, contentType, size } = req.body || {};
     if (!filename || !contentType)
@@ -84,22 +127,29 @@ app.get("/api/uploads/:id/download", async (req, res) => {
 // FORMS  (the builder side)
 // ===========================================================================
 
+const MAX_FIELDS = 50;
+
 // Validate + normalize a form definition coming from the builder.
 // When existingFields is provided (updates), match by type+label to preserve IDs.
 function normalizeForm(body, existingFields) {
   const errors = [];
   const title = (body?.title || "").trim();
   if (!title) errors.push("Form title is required");
+  if (title.length > 200) errors.push("Form title is too long (max 200 chars)");
 
   const usedIds = new Set();
   const rawFields = Array.isArray(body?.fields) ? body.fields : [];
-  const fields = rawFields.map((f, i) => {
+  if (rawFields.length > MAX_FIELDS) errors.push(`Too many fields (max ${MAX_FIELDS})`);
+
+  const fields = rawFields.slice(0, MAX_FIELDS).map((f, i) => {
     const type = f?.type;
     if (!FIELD_TYPES.includes(type)) errors.push(`Field ${i + 1}: unknown type "${type}"`);
     const label = (f?.label || "").trim();
     if (!label) errors.push(`Field ${i + 1}: label is required`);
+    if (label.length > 200) errors.push(`Field ${i + 1}: label too long (max 200 chars)`);
 
     let id = f.id;
+    if (typeof id !== "string") id = undefined;
     if (!id && existingFields) {
       const match = existingFields.find(
         (ef) => ef.type === type && ef.label === label && !usedIds.has(ef.id)
@@ -118,7 +168,8 @@ function normalizeForm(body, existingFields) {
     if (CHOICE_TYPES.includes(type)) {
       const options = (Array.isArray(f.options) ? f.options : [])
         .map((o) => String(o).trim())
-        .filter(Boolean);
+        .filter(Boolean)
+        .slice(0, 100);
       if (options.length === 0) errors.push(`Field "${label || i + 1}": needs at least one option`);
       field.options = options;
     }
@@ -126,10 +177,10 @@ function normalizeForm(body, existingFields) {
   });
 
   // Optional metadata: who the form is for and which template it came from.
-  const audience = (body?.audience || "").trim() || null;
-  const category = (body?.category || "").trim() || null;
+  const audience = (body?.audience || "").trim().slice(0, 200) || null;
+  const category = (body?.category || "").trim().slice(0, 200) || null;
 
-  return { errors, title, description: (body?.description || "").trim(), fields, audience, category };
+  return { errors, title, description: (body?.description || "").trim().slice(0, 2000), fields, audience, category };
 }
 
 app.post("/api/forms", async (req, res) => {
@@ -138,6 +189,7 @@ app.post("/api/forms", async (req, res) => {
   const form = {
     id: nanoid(10),
     title, description, audience, category, fields,
+    version: 1,
     createdAt: new Date().toISOString(),
   };
   await forms.insert(form);
@@ -147,12 +199,31 @@ app.post("/api/forms", async (req, res) => {
 app.put("/api/forms/:id", async (req, res) => {
   const existing = await forms.find(req.params.id);
   if (!existing) return res.status(404).json({ error: "Not found" });
+
+  // Optimistic concurrency: client must send the version it read.
+  const clientVersion = req.body?.version;
+  if (clientVersion != null && clientVersion !== existing.version) {
+    return res.status(409).json({
+      error: "Conflict: form was modified by another user. Please refresh and try again.",
+      currentVersion: existing.version,
+    });
+  }
+
   const { errors, title, description, fields, audience, category } = normalizeForm(req.body, existing.fields);
   if (errors.length) return res.status(400).json({ error: errors.join("; ") });
-  const form = await forms.update(req.params.id, {
+
+  const nextVersion = (existing.version || 0) + 1;
+  const form = await forms.updateIf(req.params.id, existing.version, {
     title, description, audience, category, fields,
+    version: nextVersion,
     updatedAt: new Date().toISOString(),
   });
+
+  if (!form) {
+    return res.status(409).json({
+      error: "Conflict: form was modified concurrently. Please refresh and try again.",
+    });
+  }
   res.json(form);
 });
 
@@ -179,9 +250,21 @@ app.get("/api/forms/:id", async (req, res) => {
 // RESPONSES  (the fill side)
 // ===========================================================================
 
-app.post("/api/forms/:id/responses", async (req, res) => {
+app.post("/api/forms/:id/responses", submitLimiter, async (req, res) => {
   const form = await forms.find(req.params.id);
   if (!form) return res.status(404).json({ error: "Form not found" });
+
+  // Idempotent submissions: client sends a unique submissionId.
+  const submissionId = typeof req.body?.submissionId === "string"
+    ? req.body.submissionId.trim().slice(0, 64)
+    : null;
+
+  if (submissionId) {
+    const existing = await responses.filter((r) => r.submissionId === submissionId);
+    if (existing.length > 0) {
+      return res.json({ ok: true, id: existing[0].id, duplicate: true });
+    }
+  }
 
   const answers = req.body?.answers || {};
   // Validate required fields.
@@ -203,10 +286,24 @@ app.post("/api/forms/:id/responses", async (req, res) => {
   const response = {
     id: nanoid(10),
     formId: form.id,
+    formVersion: form.version || 1,
+    ...(submissionId ? { submissionId } : {}),
     answers,
     createdAt: new Date().toISOString(),
   };
-  await responses.insert(response);
+
+  try {
+    await responses.insert(response);
+  } catch (err) {
+    if (err.code === 11000 && submissionId) {
+      const existing = await responses.filter((r) => r.submissionId === submissionId);
+      if (existing.length > 0) {
+        return res.json({ ok: true, id: existing[0].id, duplicate: true });
+      }
+    }
+    throw err;
+  }
+
   res.json({ ok: true, id: response.id });
 });
 
@@ -243,7 +340,8 @@ if (storage.mode === "local") {
   });
 }
 
-dbReady.then(() => {
+dbReady.then(async () => {
+  await ensureIndexes({ forms, responses, submissions });
   app.listen(PORT, () => {
     console.log(`form-builder server on http://localhost:${PORT} (storage: ${storage.mode}, db: mongodb)`);
   });

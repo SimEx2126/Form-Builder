@@ -32,6 +32,7 @@ export default function Builder() {
   const [audience, setAudience] = useState(null);
   const [category, setCategory] = useState(null);
   const [fields, setFields] = useState([]);
+  const [formVersion, setFormVersion] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [flashId, setFlashId] = useState(null); // briefly highlights a moved field
@@ -49,6 +50,7 @@ export default function Builder() {
         setAudience(f.audience || null);
         setCategory(f.category || null);
         setFields(f.fields);
+        setFormVersion(f.version ?? null);
       })
       .catch((e) => setError(e.message));
   }, [id, editing]);
@@ -179,7 +181,9 @@ export default function Builder() {
     setSaving(true);
     try {
       const payload = { title, description, audience, category, fields };
+      if (editing && formVersion != null) payload.version = formVersion;
       const saved = editing ? await updateForm(id, payload) : await createForm(payload);
+      if (saved.version != null) setFormVersion(saved.version);
       navigate(`/forms/${saved.id}/responses`);
     } catch (e) {
       setError(e.message);
