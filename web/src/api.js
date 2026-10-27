@@ -1,11 +1,33 @@
 // Client for the form-builder API.
-//
-// File uploads still use the 3-step flow (presign -> PUT bytes -> complete);
-// forms and responses are plain JSON CRUD on top.
 
 const BASE = ""; // same-origin; Vite proxies /api to the backend in dev
 
+function getToken() {
+  try { return localStorage.getItem("fb_token"); } catch { return null; }
+}
+
+export function setToken(token) {
+  try {
+    if (token) localStorage.setItem("fb_token", token);
+    else localStorage.removeItem("fb_token");
+  } catch {}
+}
+
+export function isLoggedIn() {
+  return !!getToken();
+}
+
+function authHeaders() {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function jsonOrThrow(res, fallback) {
+  if (res.status === 401) {
+    setToken(null);
+    window.dispatchEvent(new Event("fb:logout"));
+    throw new Error("Session expired — please log in again.");
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || fallback);
@@ -13,10 +35,33 @@ async function jsonOrThrow(res, fallback) {
   return res.json();
 }
 
-// ---- forms ----------------------------------------------------------------
+// ---- auth ------------------------------------------------------------------
+
+export const login = (email, password) =>
+  fetch(`${BASE}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  }).then((r) => jsonOrThrow(r, "Login failed"));
+
+export const register = (email, password, name) =>
+  fetch(`${BASE}/api/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, name }),
+  }).then((r) => jsonOrThrow(r, "Registration failed"));
+
+export const getMe = () =>
+  fetch(`${BASE}/api/auth/me`, {
+    headers: authHeaders(),
+  }).then((r) => jsonOrThrow(r, "Not authenticated"));
+
+// ---- forms (protected) -----------------------------------------------------
 
 export const listForms = () =>
-  fetch(`${BASE}/api/forms`).then((r) => jsonOrThrow(r, "Failed to load forms"));
+  fetch(`${BASE}/api/forms`, {
+    headers: authHeaders(),
+  }).then((r) => jsonOrThrow(r, "Failed to load forms"));
 
 export const getForm = (id) =>
   fetch(`${BASE}/api/forms/${id}`).then((r) => jsonOrThrow(r, "Form not found"));
@@ -24,14 +69,14 @@ export const getForm = (id) =>
 export const createForm = (form) =>
   fetch(`${BASE}/api/forms`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(form),
   }).then((r) => jsonOrThrow(r, "Failed to save form"));
 
 export const updateForm = async (id, form) => {
   const res = await fetch(`${BASE}/api/forms/${id}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(form),
   });
   if (res.status === 409) {
@@ -41,7 +86,7 @@ export const updateForm = async (id, form) => {
   return jsonOrThrow(res, "Failed to update form");
 };
 
-// ---- responses ------------------------------------------------------------
+// ---- responses --------------------------------------------------------------
 
 export const submitResponse = (formId, answers) => {
   const submissionId = globalThis.crypto?.randomUUID?.() || `sub_${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -53,19 +98,17 @@ export const submitResponse = (formId, answers) => {
 };
 
 export const listResponses = (formId) =>
-  fetch(`${BASE}/api/forms/${formId}/responses`).then((r) =>
-    jsonOrThrow(r, "Failed to load responses")
-  );
+  fetch(`${BASE}/api/forms/${formId}/responses`, {
+    headers: authHeaders(),
+  }).then((r) => jsonOrThrow(r, "Failed to load responses"));
 
-// ---- file uploads ---------------------------------------------------------
+// ---- file uploads -----------------------------------------------------------
 
 export async function getDownloadUrl(id) {
   const res = await fetch(`${BASE}/api/uploads/${id}/download`);
-  return jsonOrThrow(res, "Failed to get download link"); // { url, filename, contentType }
+  return jsonOrThrow(res, "Failed to get download link");
 }
 
-// Uploads one file. `onProgress(pct)` is called 0..100 during transfer.
-// Resolves to { id } once the upload is complete.
 export async function uploadFile(file, { onProgress } = {}) {
   const presign = await fetch(`${BASE}/api/uploads/presign`, {
     method: "POST",

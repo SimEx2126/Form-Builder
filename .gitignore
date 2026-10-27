@@ -1,7 +1,10 @@
 node_modules/
 dist/
 .env
+.env.local
+.env.production
 server/uploads/
 server/submissions.json
 server/forms.json
 server/responses.json
+*.log
