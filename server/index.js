@@ -85,19 +85,32 @@ app.get("/api/uploads/:id/download", async (req, res) => {
 // ===========================================================================
 
 // Validate + normalize a form definition coming from the builder.
-function normalizeForm(body) {
+// When existingFields is provided (updates), match by type+label to preserve IDs.
+function normalizeForm(body, existingFields) {
   const errors = [];
   const title = (body?.title || "").trim();
   if (!title) errors.push("Form title is required");
 
+  const usedIds = new Set();
   const rawFields = Array.isArray(body?.fields) ? body.fields : [];
   const fields = rawFields.map((f, i) => {
     const type = f?.type;
     if (!FIELD_TYPES.includes(type)) errors.push(`Field ${i + 1}: unknown type "${type}"`);
     const label = (f?.label || "").trim();
     if (!label) errors.push(`Field ${i + 1}: label is required`);
+
+    let id = f.id;
+    if (!id && existingFields) {
+      const match = existingFields.find(
+        (ef) => ef.type === type && ef.label === label && !usedIds.has(ef.id)
+      );
+      if (match) id = match.id;
+    }
+    if (!id) id = nanoid(8);
+    usedIds.add(id);
+
     const field = {
-      id: f.id || nanoid(8),
+      id,
       type,
       label,
       required: !!f.required,
@@ -134,7 +147,7 @@ app.post("/api/forms", (req, res) => {
 app.put("/api/forms/:id", (req, res) => {
   const existing = forms.find(req.params.id);
   if (!existing) return res.status(404).json({ error: "Not found" });
-  const { errors, title, description, fields, audience, category } = normalizeForm(req.body);
+  const { errors, title, description, fields, audience, category } = normalizeForm(req.body, existing.fields);
   if (errors.length) return res.status(400).json({ error: errors.join("; ") });
   const form = forms.update(req.params.id, {
     title, description, audience, category, fields,
